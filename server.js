@@ -1,120 +1,82 @@
+// supportagent/server.js
 const http = require('http');
-const express = require('express');
 const WebSocket = require('ws');
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 
-const app = express();
-const server = http.createServer(app);
+// Create an HTTP server
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Support Agent WebSocket Server\n');
+});
+
+// Create a WebSocket server
 const wss = new WebSocket.Server({ server });
 
-app.use(express.json());
-
-// Connect to MongoDB
-mongoose.connect('mongodb://<your-mongodb-uri>', { useNewUrlParser: true, useUnifiedTopology: true })
-    .then(() => console.log('Connected to MongoDB'))
-    .catch(err => console.error('MongoDB connection error:', err));
-
-// Agent Schema
-const agentSchema = new mongoose.Schema({
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    name: { type: String, required: true }
-});
-
-const Agent = mongoose.model('Agent', agentSchema);
-
-// Register a new agent
-app.post('/register', async (req, res) => {
-    const { email, password, name } = req.body;
-    try {
-        const existingAgent = await Agent.findOne({ email });
-        if (existingAgent) {
-            return res.status(400).json({ message: 'Email already exists' });
-        }
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const agent = new Agent({ email, password: hashedPassword, name });
-        await agent.save();
-        res.status(201).json({ message: 'Agent registered successfully' });
-    } catch (error) {
-        res.status(500).json({ message: 'Error registering agent', error });
-    }
-});
-
-// Login an agent
-app.post('/login', async (req, res) => {
-    const { email, password } = req.body;
-    try {
-        const agent = await Agent.findOne({ email });
-        if (!agent) {
-            return res.status(400).json({ message: 'Invalid email or password' });
-        }
-        const isMatch = await bcrypt.compare(password, agent.password);
-        if (!isMatch) {
-            return res.status(400).json({ message: 'Invalid email or password' });
-        }
-        const token = jwt.sign({ email: agent.email, name: agent.name }, process.env.JWT_SECRET || 'your_jwt_secret', { expiresIn: '1h' });
-        res.json({ token, name: agent.name });
-    } catch (error) {
-        res.status(500).json({ message: 'Error logging in', error });
-    }
-});
-
-// WebSocket server with authentication
+// Store connected clients (users and agents)
 const clients = new Map();
+
+// Store agent credentials (email, password, name) - In production, use a database and hash passwords
+const agents = [
+    { email: 'shafeenafarheen2025@gmail.com', password: 'shafeena123', name: 'Shafeena' }, // Example password for Shafeena
+    { email: 'demo@gmail.com', password: '123456', name: 'Devend' }
+];
 
 wss.on('connection', (ws, req) => {
     console.log('New WebSocket connection');
 
-    // Parse query parameters
+    // Determine client type based on query parameter
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const clientType = url.searchParams.get('type') || 'user';
-    const clientId = url.searchParams.get('id') || `client_${Date.now()}`;
-    const token = url.searchParams.get('token');
+    const clientType = url.searchParams.get('type') || 'user'; // Default to 'user' if not specified
+    const clientId = url.searchParams.get('id') || `client_${Date.now()}`; // Unique ID for each client
 
-    // Authenticate agents
+    // If the client is an agent, require authentication
     if (clientType === 'agent') {
-        if (!token) {
-            ws.close(4000, 'Authentication token required');
-            return;
-        }
-        try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
-            console.log(`Agent authenticated: ${decoded.name}`);
-        } catch (error) {
-            ws.close(4001, 'Invalid authentication token');
-            return;
-        }
-    }
+        const email = url.searchParams.get('email');
+        const password = url.searchParams.get('password');
 
-    clients.set(ws, { type: clientType, id: clientId });
-    console.log(`Client connected: ${clientId} (${clientType})`);
+        // Find the agent in the credentials store
+        const agent = agents.find(a => a.email === email && a.password === password);
+        if (!agent) {
+            ws.send(JSON.stringify({ type: 'auth-error', message: 'Invalid email or password' }));
+            ws.close();
+            return;
+        }
+
+        // Store the agent's name with the WebSocket connection
+        clients.set(ws, { type: clientType, id: clientId, name: agent.name });
+        console.log(`Agent connected: ${agent.name} (${clientId})`);
+    } else {
+        clients.set(ws, { type: clientType, id: clientId });
+        console.log(`Client connected: ${clientId} (${clientType})`);
+    }
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
             console.log('Received:', data);
 
-            if (data.type === 'support-message' && clientType === 'user') {
+            const clientInfo = clients.get(ws);
+
+            // Broadcast messages based on client type
+            if (data.type === 'support-message' && clientInfo.type === 'user') {
+                // User sent a message, broadcast to all agents
                 wss.clients.forEach((client) => {
-                    const clientInfo = clients.get(client);
-                    if (client.readyState === WebSocket.OPEN && clientInfo.type === 'agent') {
+                    const info = clients.get(client);
+                    if (client.readyState === WebSocket.OPEN && info.type === 'agent') {
                         client.send(JSON.stringify({
                             type: 'support-message',
-                            user: data.user || clientInfo.id,
+                            user: data.user || info.id,
                             message: data.message
                         }));
                     }
                 });
-            } else if (data.type === 'support-reply' && clientType === 'agent') {
-                console.log(`Agent ${data.agent} replied: ${data.message}`);
+            } else if (data.type === 'support-reply' && clientInfo.type === 'agent') {
+                // Agent sent a reply, broadcast to all users with the agent's name
                 wss.clients.forEach((client) => {
-                    const clientInfo = clients.get(client);
-                    if (client.readyState === WebSocket.OPEN && clientInfo.type === 'user') {
+                    const info = clients.get(client);
+                    if (client.readyState === WebSocket.OPEN && info.type === 'user') {
                         client.send(JSON.stringify({
                             type: 'support-reply',
-                            agent: data.agent,
+                            agent: clientInfo.name, // Use the agent's name (Devend or Shafeena)
                             message: data.message
                         }));
                     }
@@ -125,8 +87,9 @@ wss.on('connection', (ws, req) => {
         }
     });
 
-    ws.on('close', (code, reason) => {
-        console.log(`Client disconnected: ${clientId} (${clientType}) - Code: ${code}, Reason: ${reason}`);
+    ws.on('close', () => {
+        const clientInfo = clients.get(ws);
+        console.log(`Client disconnected: ${clientInfo.id} (${clientInfo.type})`);
         clients.delete(ws);
     });
 
@@ -139,5 +102,5 @@ wss.on('connection', (ws, req) => {
 // Start the server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Support Agent Server running on port ${PORT}`);
+    console.log(`Support Agent WebSocket Server running on port ${PORT}`);
 });
