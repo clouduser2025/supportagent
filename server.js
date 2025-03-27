@@ -1,4 +1,3 @@
-// supportagent/server.js
 const http = require('http');
 const WebSocket = require('ws');
 
@@ -16,7 +15,7 @@ const clients = new Map();
 
 // Store agent credentials (email, password, name) - In production, use a database and hash passwords
 const agents = [
-    { email: 'shafeenafarheen2025@gmail.com', password: 'shafeena123', name: 'Shafeena' }, // Example password for Shafeena
+    { email: 'shafeenafarheen2025@gmail.com', password: 'shafeena123', name: 'Shafeena' },
     { email: 'demo@gmail.com', password: '123456', name: 'Devend' }
 ];
 
@@ -76,11 +75,28 @@ wss.on('connection', (ws, req) => {
                     if (client.readyState === WebSocket.OPEN && info.type === 'user') {
                         client.send(JSON.stringify({
                             type: 'support-reply',
-                            agent: clientInfo.name, // Use the agent's name (Devend or Shafeena)
+                            agent: clientInfo.name,
                             message: data.message
                         }));
                     }
                 });
+            } else if (data.type === 'support-end' && clientInfo.type === 'agent') {
+                // Agent sent a support-end message, broadcast to all users
+                console.log(`Agent ${clientInfo.name} ended the support session`);
+                wss.clients.forEach((client) => {
+                    const info = clients.get(client);
+                    if (client.readyState === WebSocket.OPEN && info.type === 'user') {
+                        client.send(JSON.stringify({
+                            type: 'support-end',
+                            agent: clientInfo.name
+                        }));
+                    }
+                });
+                // Notify the agent that the session has ended
+                ws.send(JSON.stringify({
+                    type: 'support-end',
+                    message: 'Support session ended successfully.'
+                }));
             }
         } catch (error) {
             console.error('Error processing message:', error);
