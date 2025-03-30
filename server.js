@@ -30,6 +30,13 @@ wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const clientType = url.searchParams.get('type') || 'user'; // Default to 'user' if not specified
     const clientId = url.searchParams.get('id') || `client_${Date.now()}`; // Unique ID for each client
+    let clientName = url.searchParams.get('name') || 'Anonymous'; // Get the username from query parameter
+
+    // Validate and sanitize the username
+    clientName = clientName.trim();
+    if (clientName.length === 0 || clientName.length > 50) {
+        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid
+    }
 
     // If the client is an agent, require authentication
     if (clientType === 'agent') {
@@ -48,10 +55,13 @@ wss.on('connection', (ws, req) => {
         clients.set(ws, { type: clientType, id: clientId, name: agent.name });
         agentAssignments.set(clientId, new Set()); // Initialize an empty set of users for this agent
         console.log(`Agent connected: ${agent.name} (${clientId})`);
+
+        // Send authentication success message to the agent
+        ws.send(JSON.stringify({ type: 'authenticated', agentId: clientId }));
     } else {
         // For users, assign them to an available agent
-        clients.set(ws, { type: clientType, id: clientId, name: url.searchParams.get('name') || 'Anonymous' });
-        console.log(`User connected: ${clientId} (${clientType})`);
+        clients.set(ws, { type: clientType, id: clientId, name: clientName });
+        console.log(`User connected: ${clientId} (${clientType}) - Name: ${clientName}`);
 
         // Assign the user to an agent
         let assignedAgentWs = null;
@@ -79,12 +89,21 @@ wss.on('connection', (ws, req) => {
             return;
         }
 
-        console.log(`User ${clientId} assigned to agent ${assignedAgentId}`);
+        console.log(`User ${clientId} (Name: ${clientName}) assigned to agent ${assignedAgentId}`);
+
+        // Notify the agent of the new user
+        if (assignedAgentWs && assignedAgentWs.readyState === WebSocket.OPEN) {
+            assignedAgentWs.send(JSON.stringify({
+                type: 'newUser',
+                userId: clientId,
+                userName: clientName // Send the real username to the agent
+            }));
+        }
     }
 
     ws.on('message', (message) => {
         try {
-            const data = JSON.parse(message);
+            const data = JSON.parse(message.toString()); // Ensure message is a string
             console.log('Received:', data);
 
             const clientInfo = clients.get(ws);
@@ -105,7 +124,7 @@ wss.on('connection', (ws, req) => {
                 if (agentWs && agentWs.readyState === WebSocket.OPEN) {
                     agentWs.send(JSON.stringify({
                         type: 'support-message',
-                        user: data.user || clientInfo.name,
+                        user: clientInfo.name, // Use the stored username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
                         isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
@@ -134,35 +153,45 @@ wss.on('connection', (ws, req) => {
                     }));
                 }
             } else if (data.type === 'support-end' && clientInfo.type === 'agent') {
-                // Agent ended the session, notify all assigned users
-                const assignedUsers = agentAssignments.get(clientInfo.id);
-                for (const userId of assignedUsers) {
-                    let userWs = null;
-                    for (const [ws, info] of clients) {
-                        if (info.type === 'user' && info.id === userId) {
-                            userWs = ws;
-                            break;
-                        }
-                    }
-                    if (userWs && userWs.readyState === WebSocket.OPEN) {
-                        userWs.send(JSON.stringify({
-                            type: 'support-end',
-                            agent: clientInfo.name
-                        }));
+                // Agent ended the session for a specific user
+                const userId = data.userId; // The userId should be included in the end session request
+                let userWs = null;
+
+                for (const [ws, info] of clients) {
+                    if (info.type === 'user' && info.id === userId) {
+                        userWs = ws;
+                        break;
                     }
                 }
 
-                // Notify the agent that the session has ended
+                if (userWs && userWs.readyState === WebSocket.OPEN) {
+                    userWs.send(JSON.stringify({
+                        type: 'support-end',
+                        agent: clientInfo.name,
+                        message: 'Support session ended by the agent.'
+                    }));
+                    userWs.close();
+                }
+
+                // Remove the user from the agent's assigned users
+                const assignedUsers = agentAssignments.get(clientInfo.id);
+                if (assignedUsers) {
+                    assignedUsers.delete(userId);
+                }
+
+                // Notify the agent that the session has ended for this user
                 ws.send(JSON.stringify({
                     type: 'support-end',
-                    message: 'Support session ended successfully.'
+                    userId: userId,
+                    message: `Support session with ${userId} ended successfully.`
                 }));
-
-                // Clear the agent's assigned users
-                agentAssignments.set(clientInfo.id, new Set());
             }
         } catch (error) {
             console.error('Error processing message:', error);
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'An error occurred while processing your message.'
+            }));
         }
     });
 
@@ -172,7 +201,7 @@ wss.on('connection', (ws, req) => {
 
         if (clientInfo.type === 'agent') {
             // Notify all assigned users that the agent has disconnected
-            const assignedUsers = agentAssignments.get(clientInfo.id);
+            const assignedUsers = agentAssignments.get(clientInfo.id) || new Set();
             for (const userId of assignedUsers) {
                 let userWs = null;
                 for (const [ws, info] of clients) {
@@ -197,6 +226,22 @@ wss.on('connection', (ws, req) => {
                 const assignedUsers = agentAssignments.get(agentId);
                 if (assignedUsers) {
                     assignedUsers.delete(clientInfo.id);
+                }
+
+                // Notify the agent of the user disconnection
+                let agentWs = null;
+                for (const [ws, info] of clients) {
+                    if (info.type === 'agent' && info.id === agentId) {
+                        agentWs = ws;
+                        break;
+                    }
+                }
+                if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+                    agentWs.send(JSON.stringify({
+                        type: 'user-disconnected',
+                        userId: clientInfo.id,
+                        userName: clientInfo.name
+                    }));
                 }
             }
         }
