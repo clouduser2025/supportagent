@@ -53,7 +53,7 @@ wss.on('connection', (ws, req) => {
         // Assign an agent if available
         let assignedAgent = null;
         agents.forEach((agent, agentId) => {
-            if (!assignedAgent && (!agentUserMap.has(agentId) || agentUserMap.get(agentId).size < 2)) { // Limit to 2 users per agent
+            if (!assignedAgent && (!agentUserMap.has(agentId) || agentUserMap.get(agentId).size < 2)) {
                 assignedAgent = agentId;
             }
         });
@@ -94,6 +94,9 @@ wss.on('connection', (ws, req) => {
         }
     }
 
+    console.log('Server: Current userAgentMap:', [...userAgentMap.entries()]);
+    console.log('Server: Current agentUserMap:', [...agentUserMap.entries()].map(([agentId, userSet]) => [agentId, [...userSet]]));
+
     ws.on('message', (message) => {
         const data = JSON.parse(message);
 
@@ -123,16 +126,30 @@ wss.on('connection', (ws, req) => {
             }
         } else if (data.type === 'support-end') {
             const userId = data.userId;
+            console.log(`Server: Received support-end for user ${userId} from agent ${id}`);
             if (users.has(userId)) {
                 const user = users.get(userId);
+                const agentId = userAgentMap.get(userId);
                 if (user.ws.readyState === WebSocket.OPEN) {
+                    console.log(`Server: Sending support-end to user ${userId}`);
                     user.ws.send(JSON.stringify({
                         type: 'support-end'
                     }));
+                } else {
+                    console.warn(`Server: User ${userId} WebSocket is not open`);
                 }
                 userAgentMap.delete(userId);
-                agentUserMap.get(id).delete(userId);
+                if (agentId && agentUserMap.has(agentId)) {
+                    agentUserMap.get(agentId).delete(userId);
+                    if (agentUserMap.get(agentId).size === 0) {
+                        agentUserMap.delete(agentId);
+                    }
+                }
+            } else {
+                console.warn(`Server: User ${userId} not found`);
             }
+            console.log('Server: Current userAgentMap after support-end:', [...userAgentMap.entries()]);
+            console.log('Server: Current agentUserMap after support-end:', [...agentUserMap.entries()].map(([agentId, userSet]) => [agentId, [...userSet]]));
         }
     });
 
@@ -171,6 +188,8 @@ wss.on('connection', (ws, req) => {
             agentUserMap.delete(id);
             console.log(`Agent disconnected: ${id}`);
         }
+        console.log('Server: Current userAgentMap after close:', [...userAgentMap.entries()]);
+        console.log('Server: Current agentUserMap after close:', [...agentUserMap.entries()].map(([agentId, userSet]) => [agentId, [...userSet]]));
     });
 });
 
