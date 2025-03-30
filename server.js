@@ -1,217 +1,180 @@
-const http = require('http');
+const express = require('express');
 const WebSocket = require('ws');
+const http = require('http');
 
-// Create an HTTP server
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Support Agent WebSocket Server\n');
-});
-
-// Create a WebSocket server
+const app = express();
+const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Store connected clients (users and agents)
-const clients = new Map();
-// Store agent-to-user assignments
-const agentAssignments = new Map();
-// Maximum users per agent
-const MAX_USERS_PER_AGENT = 3;
+app.use(express.json());
 
-// Store agent credentials (email, password, name) - In production, use a database and hash passwords
-const agents = [
-    { email: 'shafeenafarheen2025@gmail.com', password: 'shafeena123', name: 'Shafeena' },
-    { email: 'demo@gmail.com', password: '123456', name: 'Devend' }
-];
+// Mock database of usernames and real names
+const userDatabase = {
+    'john_doe': 'John Smith',
+    'jane_smith': 'Jane Doe',
+    'user123': 'Alex Johnson'
+};
+
+// API to fetch real name based on username
+app.post('/api/getRealName', (req, res) => {
+    const { username } = req.body;
+    const realName = userDatabase[username.toLowerCase()] || null;
+    res.json({ realName });
+});
+
+let users = new Map();
+let agents = new Map();
+let userAgentMap = new Map(); // Maps userId to agentId
+let agentUserMap = new Map(); // Maps agentId to set of userIds
 
 wss.on('connection', (ws, req) => {
-    console.log('New WebSocket connection');
+    const urlParams = new URLSearchParams(req.url.split('?')[1]);
+    const type = urlParams.get('type');
+    const id = urlParams.get('id');
+    const name = urlParams.get('name');
+    const contact = urlParams.get('contact') || 'Not provided';
 
-    // Determine client type based on query parameter
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const clientType = url.searchParams.get('type') || 'user'; // Default to 'user' if not specified
-    const clientId = url.searchParams.get('id') || `client_${Date.now()}`; // Unique ID for each client
+    if (type === 'user') {
+        users.set(id, { ws, name, contact });
+        console.log(`User connected: ${id} (${name})`);
 
-    // If the client is an agent, require authentication
-    if (clientType === 'agent') {
-        const email = url.searchParams.get('email');
-        const password = url.searchParams.get('password');
-
-        // Find the agent in the credentials store
-        const agent = agents.find(a => a.email === email && a.password === password);
-        if (!agent) {
-            ws.send(JSON.stringify({ type: 'auth-error', message: 'Invalid email or password' }));
-            ws.close();
-            return;
-        }
-
-        // Store the agent's details
-        clients.set(ws, { type: clientType, id: clientId, name: agent.name });
-        agentAssignments.set(clientId, new Set()); // Initialize an empty set of users for this agent
-        console.log(`Agent connected: ${agent.name} (${clientId})`);
-    } else {
-        // For users, assign them to an available agent
-        clients.set(ws, { type: clientType, id: clientId, name: url.searchParams.get('name') || 'Anonymous' });
-        console.log(`User connected: ${clientId} (${clientType})`);
-
-        // Assign the user to an agent
-        let assignedAgentWs = null;
-        let assignedAgentId = null;
-
-        for (const [agentWs, agentInfo] of clients) {
-            if (agentInfo.type === 'agent') {
-                const assignedUsers = agentAssignments.get(agentInfo.id);
-                if (assignedUsers.size < MAX_USERS_PER_AGENT) {
-                    assignedUsers.add(clientId);
-                    assignedAgentWs = agentWs;
-                    assignedAgentId = agentInfo.id;
-                    clients.get(ws).agentId = agentInfo.id; // Store the assigned agent ID in the user's client info
-                    break;
-                }
+        // Notify all agents of the new user
+        agents.forEach(agent => {
+            if (agent.ws.readyState === WebSocket.OPEN) {
+                agent.ws.send(JSON.stringify({
+                    type: 'user-connected',
+                    userId: id,
+                    name,
+                    contact
+                }));
             }
-        }
+        });
 
-        if (!assignedAgentWs) {
+        // Assign an agent if available
+        let assignedAgent = null;
+        agents.forEach((agent, agentId) => {
+            if (!assignedAgent && (!agentUserMap.has(agentId) || agentUserMap.get(agentId).size < 2)) { // Limit to 2 users per agent
+                assignedAgent = agentId;
+            }
+        });
+
+        if (assignedAgent) {
+            userAgentMap.set(id, assignedAgent);
+            if (!agentUserMap.has(assignedAgent)) {
+                agentUserMap.set(assignedAgent, new Set());
+            }
+            agentUserMap.get(assignedAgent).add(id);
             ws.send(JSON.stringify({
-                type: 'support-message',
-                message: 'No agents are available at the moment. Please try again later.'
+                type: 'agent-assigned',
+                agent: agents.get(assignedAgent).name
             }));
-            ws.close();
-            return;
+        } else {
+            ws.send(JSON.stringify({
+                type: 'no-agents-available'
+            }));
         }
+    } else if (type === 'agent') {
+        agents.set(id, { ws, name });
+        console.log(`Agent connected: ${id} (${name})`);
 
-        console.log(`User ${clientId} assigned to agent ${assignedAgentId}`);
+        // Send the list of connected users to the agent
+        users.forEach((user, userId) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'user-connected',
+                    userId,
+                    name: user.name,
+                    contact: user.contact
+                }));
+            }
+        });
+
+        if (!agentUserMap.has(id)) {
+            agentUserMap.set(id, new Set());
+        }
     }
 
     ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-            console.log('Received:', data);
+        const data = JSON.parse(message);
 
-            const clientInfo = clients.get(ws);
-
-            // Handle messages based on client type
-            if (data.type === 'support-message' && clientInfo.type === 'user') {
-                // User sent a message, send it to their assigned agent
-                const agentId = clientInfo.agentId;
-                let agentWs = null;
-
-                for (const [ws, info] of clients) {
-                    if (info.type === 'agent' && info.id === agentId) {
-                        agentWs = ws;
-                        break;
-                    }
-                }
-
-                if (agentWs && agentWs.readyState === WebSocket.OPEN) {
-                    agentWs.send(JSON.stringify({
+        if (data.type === 'support-message') {
+            const agentId = userAgentMap.get(id);
+            if (agentId && agents.has(agentId)) {
+                const agent = agents.get(agentId);
+                if (agent.ws.readyState === WebSocket.OPEN) {
+                    agent.ws.send(JSON.stringify({
                         type: 'support-message',
-                        user: data.user || clientInfo.name,
-                        userId: clientInfo.id, // Include userId for tracking
-                        message: data.message,
-                        isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
-                    }));
-
-                    // Mark that the user has sent a message
-                    clientInfo.hasSentMessage = true;
-                }
-            } else if (data.type === 'support-reply' && clientInfo.type === 'agent') {
-                // Agent sent a reply, send it to the specific user
-                const userId = data.userId; // The userId should be included in the reply
-                let userWs = null;
-
-                for (const [ws, info] of clients) {
-                    if (info.type === 'user' && info.id === userId) {
-                        userWs = ws;
-                        break;
-                    }
-                }
-
-                if (userWs && userWs.readyState === WebSocket.OPEN) {
-                    userWs.send(JSON.stringify({
-                        type: 'support-reply',
-                        agent: clientInfo.name,
+                        userId: id,
                         message: data.message
                     }));
                 }
-            } else if (data.type === 'support-end' && clientInfo.type === 'agent') {
-                // Agent ended the session, notify all assigned users
-                const assignedUsers = agentAssignments.get(clientInfo.id);
-                for (const userId of assignedUsers) {
-                    let userWs = null;
-                    for (const [ws, info] of clients) {
-                        if (info.type === 'user' && info.id === userId) {
-                            userWs = ws;
-                            break;
-                        }
-                    }
-                    if (userWs && userWs.readyState === WebSocket.OPEN) {
-                        userWs.send(JSON.stringify({
-                            type: 'support-end',
-                            agent: clientInfo.name
-                        }));
-                    }
-                }
-
-                // Notify the agent that the session has ended
-                ws.send(JSON.stringify({
-                    type: 'support-end',
-                    message: 'Support session ended successfully.'
-                }));
-
-                // Clear the agent's assigned users
-                agentAssignments.set(clientInfo.id, new Set());
             }
-        } catch (error) {
-            console.error('Error processing message:', error);
+        } else if (data.type === 'support-reply') {
+            const userId = data.userId;
+            if (users.has(userId)) {
+                const user = users.get(userId);
+                if (user.ws.readyState === WebSocket.OPEN) {
+                    user.ws.send(JSON.stringify({
+                        type: 'support-reply',
+                        agent: data.agent,
+                        message: data.message
+                    }));
+                }
+            }
+        } else if (data.type === 'support-end') {
+            const userId = data.userId;
+            if (users.has(userId)) {
+                const user = users.get(userId);
+                if (user.ws.readyState === WebSocket.OPEN) {
+                    user.ws.send(JSON.stringify({
+                        type: 'support-end'
+                    }));
+                }
+                userAgentMap.delete(userId);
+                agentUserMap.get(id).delete(userId);
+            }
         }
     });
 
     ws.on('close', () => {
-        const clientInfo = clients.get(ws);
-        console.log(`Client disconnected: ${clientInfo.id} (${clientInfo.type})`);
-
-        if (clientInfo.type === 'agent') {
-            // Notify all assigned users that the agent has disconnected
-            const assignedUsers = agentAssignments.get(clientInfo.id);
-            for (const userId of assignedUsers) {
-                let userWs = null;
-                for (const [ws, info] of clients) {
-                    if (info.type === 'user' && info.id === userId) {
-                        userWs = ws;
-                        break;
+        if (type === 'user') {
+            users.delete(id);
+            const agentId = userAgentMap.get(id);
+            if (agentId) {
+                agentUserMap.get(agentId).delete(id);
+                userAgentMap.delete(id);
+                if (agents.has(agentId)) {
+                    const agent = agents.get(agentId);
+                    if (agent.ws.readyState === WebSocket.OPEN) {
+                        agent.ws.send(JSON.stringify({
+                            type: 'user-disconnected',
+                            userId: id
+                        }));
                     }
                 }
-                if (userWs && userWs.readyState === WebSocket.OPEN) {
-                    userWs.send(JSON.stringify({
-                        type: 'support-end',
-                        message: 'Agent has disconnected. Please try again later.'
-                    }));
-                    userWs.close();
-                }
             }
-            agentAssignments.delete(clientInfo.id);
-        } else if (clientInfo.type === 'user') {
-            // Remove the user from the agent's assigned users
-            const agentId = clientInfo.agentId;
-            if (agentId) {
-                const assignedUsers = agentAssignments.get(agentId);
-                if (assignedUsers) {
-                    assignedUsers.delete(clientInfo.id);
+            console.log(`User disconnected: ${id}`);
+        } else if (type === 'agent') {
+            agents.delete(id);
+            const assignedUsers = agentUserMap.get(id) || new Set();
+            assignedUsers.forEach(userId => {
+                if (users.has(userId)) {
+                    const user = users.get(userId);
+                    if (user.ws.readyState === WebSocket.OPEN) {
+                        user.ws.send(JSON.stringify({
+                            type: 'support-end'
+                        }));
+                    }
+                    userAgentMap.delete(userId);
                 }
-            }
+            });
+            agentUserMap.delete(id);
+            console.log(`Agent disconnected: ${id}`);
         }
-
-        clients.delete(ws);
-    });
-
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        clients.delete(ws);
     });
 });
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Support Agent WebSocket Server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
