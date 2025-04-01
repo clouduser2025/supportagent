@@ -1,6 +1,6 @@
 const http = require('http');
 const WebSocket = require('ws');
-const url = require('url'); // Import the url module to parse query parameters
+const url = require('url');
 
 // Create an HTTP server
 const server = http.createServer((req, res) => {
@@ -40,8 +40,8 @@ wss.on('connection', (ws, req) => {
     console.log('Extracted clientName:', clientName);
 
     // Validate and sanitize the username
-    if (!clientName || clientName.trim().length === 0 || clientName.trim().length > 50) {
-        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid or missing
+    if (!clientName || clientName.trim().length === 0 || clientName.trim().length > 50 || clientName === 'undefined') {
+        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid, missing, or 'undefined'
     } else {
         clientName = clientName.trim();
     }
@@ -132,7 +132,7 @@ wss.on('connection', (ws, req) => {
                 if (agentWs && agentWs.readyState === WebSocket.OPEN) {
                     agentWs.send(JSON.stringify({
                         type: 'support-message',
-                        user: clientInfo.name, // Use the stored username
+                        user: clientInfo.name, // Use the actual username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
                         isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
