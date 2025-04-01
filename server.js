@@ -65,7 +65,7 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({ type: 'authenticated', agentId: clientId }));
     } else {
         // For users, assign them to an available agent
-        clients.set(ws, { type: clientType, id: clientId, name: clientName });
+        clients.set(ws, { type: clientType, id: clientId, name: clientName, hasSentMessage: false }); // Add hasSentMessage flag
         console.log(`User connected: ${clientId} (${clientType}) - Name: ${clientName}`);
 
         // Assign the user to an agent
@@ -101,7 +101,7 @@ wss.on('connection', (ws, req) => {
             assignedAgentWs.send(JSON.stringify({
                 type: 'newUser',
                 userId: clientId,
-                userName: clientName // Send the real username to the agent
+                userName: clientName // Send the initial username to the agent
             }));
         }
     }
@@ -126,17 +126,33 @@ wss.on('connection', (ws, req) => {
                     }
                 }
 
+                // Update the user's name with the first message
+                if (!clientInfo.hasSentMessage) {
+                    const newName = data.message.trim();
+                    if (newName.length > 0 && newName.length <= 50) {
+                        clientInfo.name = newName; // Update the stored name
+                        console.log(`Updated user ${clientInfo.id} name to: ${newName}`);
+
+                        // Notify the agent of the updated name
+                        if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+                            agentWs.send(JSON.stringify({
+                                type: 'updateUserName',
+                                userId: clientInfo.id,
+                                userName: newName
+                            }));
+                        }
+                    }
+                    clientInfo.hasSentMessage = true; // Mark that the user has sent a message
+                }
+
                 if (agentWs && agentWs.readyState === WebSocket.OPEN) {
                     agentWs.send(JSON.stringify({
                         type: 'support-message',
-                        user: clientInfo.name, // Use the stored username
+                        user: clientInfo.name, // Use the updated username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
                         isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
                     }));
-
-                    // Mark that the user has sent a message
-                    clientInfo.hasSentMessage = true;
                 }
             } else if (data.type === 'support-reply' && clientInfo.type === 'agent') {
                 // Agent sent a reply, send it to the specific user
