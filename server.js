@@ -63,6 +63,19 @@ wss.on('connection', (ws, req) => {
 
         // Send authentication success message to the agent
         ws.send(JSON.stringify({ type: 'authenticated', agentId: clientId }));
+
+        // Send the list of currently assigned users to the agent
+        const assignedUsers = agentAssignments.get(clientId);
+        for (const userId of assignedUsers) {
+            const userInfo = Array.from(clients.values()).find(info => info.id === userId && info.type === 'user');
+            if (userInfo) {
+                ws.send(JSON.stringify({
+                    type: 'newUser',
+                    userId: userId,
+                    userName: userInfo.name
+                }));
+            }
+        }
     } else {
         // For users, assign them to an available agent
         clients.set(ws, { type: clientType, id: clientId, name: clientName });
@@ -87,7 +100,7 @@ wss.on('connection', (ws, req) => {
 
         if (!assignedAgentWs) {
             ws.send(JSON.stringify({
-                type: 'support-message',
+                type: 'no-agents-available',
                 message: 'No agents are available at the moment. Please try again later.'
             }));
             ws.close();
@@ -95,6 +108,13 @@ wss.on('connection', (ws, req) => {
         }
 
         console.log(`User ${clientId} (Name: ${clientName}) assigned to agent ${assignedAgentId}`);
+
+        // Notify the user that they are connected to an agent
+        const agentInfo = Array.from(clients.values()).find(info => info.id === assignedAgentId);
+        ws.send(JSON.stringify({
+            type: 'agent-assigned',
+            agent: agentInfo.name
+        }));
 
         // Notify the agent of the new user
         if (assignedAgentWs && assignedAgentWs.readyState === WebSocket.OPEN) {
@@ -113,6 +133,33 @@ wss.on('connection', (ws, req) => {
 
             const clientInfo = clients.get(ws);
 
+            // Handle the setName message to update the user's name
+            if (data.type === 'setName' && clientInfo.type === 'user') {
+                const newName = data.name && data.name.trim().length > 0 && data.name.trim().length <= 50 ? data.name.trim() : 'Anonymous';
+                const oldName = clientInfo.name;
+                clientInfo.name = newName; // Update the name in the clients map
+                console.log(`User ${clientInfo.id} updated name from "${oldName}" to "${newName}"`);
+
+                // Notify the assigned agent of the name change
+                const agentId = clientInfo.agentId;
+                let agentWs = null;
+                for (const [ws, info] of clients) {
+                    if (info.type === 'agent' && info.id === agentId) {
+                        agentWs = ws;
+                        break;
+                    }
+                }
+
+                if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+                    agentWs.send(JSON.stringify({
+                        type: 'name-updated',
+                        userId: clientInfo.id,
+                        userName: newName
+                    }));
+                }
+                return; // Exit after handling setName
+            }
+
             // Handle messages based on client type
             if (data.type === 'support-message' && clientInfo.type === 'user') {
                 // User sent a message, send it to their assigned agent
@@ -129,7 +176,7 @@ wss.on('connection', (ws, req) => {
                 if (agentWs && agentWs.readyState === WebSocket.OPEN) {
                     agentWs.send(JSON.stringify({
                         type: 'support-message',
-                        user: clientInfo.name, // Use the stored username
+                        user: clientInfo.name, // Use the updated username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
                         isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
