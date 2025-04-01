@@ -1,5 +1,6 @@
 const http = require('http');
 const WebSocket = require('ws');
+const url = require('url'); // Import the url module to parse query parameters
 
 // Create an HTTP server
 const server = http.createServer((req, res) => {
@@ -26,14 +27,16 @@ const agents = [
 wss.on('connection', (ws, req) => {
     console.log('New WebSocket connection');
 
-    // Determine client type based on query parameter
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const clientType = url.searchParams.get('type') || 'user'; // Default to 'user' if not specified
-    const clientId = url.searchParams.get('id') || `client_${Date.now()}`; // Unique ID for each client
-    let clientName = url.searchParams.get('name'); // Get the username from query parameter
+    // Parse the URL and query parameters
+    const parsedUrl = url.parse(req.url, true);
+    const query = parsedUrl.query;
+    const clientType = query.type || 'user'; // Default to 'user' if not specified
+    const clientId = query.id || `client_${Date.now()}`; // Unique ID for each client
+    let clientName = query.name; // Get the username from query parameter
+    const contact = query.contact || 'Not provided'; // Get the contact number (if provided)
 
     // Debug the raw query parameters to ensure 'name' is being received
-    console.log('Query parameters:', url.searchParams.toString());
+    console.log('Query parameters:', query);
     console.log('Extracted clientName:', clientName);
 
     // Validate and sanitize the username
@@ -45,8 +48,8 @@ wss.on('connection', (ws, req) => {
 
     // If the client is an agent, require authentication
     if (clientType === 'agent') {
-        const email = url.searchParams.get('email');
-        const password = url.searchParams.get('password');
+        const email = query.email;
+        const password = query.password;
 
         // Find the agent in the credentials store
         const agent = agents.find(a => a.email === email && a.password === password);
@@ -63,23 +66,10 @@ wss.on('connection', (ws, req) => {
 
         // Send authentication success message to the agent
         ws.send(JSON.stringify({ type: 'authenticated', agentId: clientId }));
-
-        // Send the list of currently assigned users to the agent
-        const assignedUsers = agentAssignments.get(clientId);
-        for (const userId of assignedUsers) {
-            const userInfo = Array.from(clients.values()).find(info => info.id === userId && info.type === 'user');
-            if (userInfo) {
-                ws.send(JSON.stringify({
-                    type: 'newUser',
-                    userId: userId,
-                    userName: userInfo.name
-                }));
-            }
-        }
     } else {
         // For users, assign them to an available agent
-        clients.set(ws, { type: clientType, id: clientId, name: clientName });
-        console.log(`User connected: ${clientId} (${clientType}) - Name: ${clientName}`);
+        clients.set(ws, { type: clientType, id: clientId, name: clientName, contact });
+        console.log(`User connected: ${clientId} (${clientType}) - Name: ${clientName}, Contact: ${contact}`);
 
         // Assign the user to an agent
         let assignedAgentWs = null;
@@ -100,7 +90,7 @@ wss.on('connection', (ws, req) => {
 
         if (!assignedAgentWs) {
             ws.send(JSON.stringify({
-                type: 'no-agents-available',
+                type: 'support-message',
                 message: 'No agents are available at the moment. Please try again later.'
             }));
             ws.close();
@@ -108,13 +98,6 @@ wss.on('connection', (ws, req) => {
         }
 
         console.log(`User ${clientId} (Name: ${clientName}) assigned to agent ${assignedAgentId}`);
-
-        // Notify the user that they are connected to an agent
-        const agentInfo = Array.from(clients.values()).find(info => info.id === assignedAgentId);
-        ws.send(JSON.stringify({
-            type: 'agent-assigned',
-            agent: agentInfo.name
-        }));
 
         // Notify the agent of the new user
         if (assignedAgentWs && assignedAgentWs.readyState === WebSocket.OPEN) {
@@ -133,33 +116,6 @@ wss.on('connection', (ws, req) => {
 
             const clientInfo = clients.get(ws);
 
-            // Handle the setName message to update the user's name
-            if (data.type === 'setName' && clientInfo.type === 'user') {
-                const newName = data.name && data.name.trim().length > 0 && data.name.trim().length <= 50 ? data.name.trim() : 'Anonymous';
-                const oldName = clientInfo.name;
-                clientInfo.name = newName; // Update the name in the clients map
-                console.log(`User ${clientInfo.id} updated name from "${oldName}" to "${newName}"`);
-
-                // Notify the assigned agent of the name change
-                const agentId = clientInfo.agentId;
-                let agentWs = null;
-                for (const [ws, info] of clients) {
-                    if (info.type === 'agent' && info.id === agentId) {
-                        agentWs = ws;
-                        break;
-                    }
-                }
-
-                if (agentWs && agentWs.readyState === WebSocket.OPEN) {
-                    agentWs.send(JSON.stringify({
-                        type: 'name-updated',
-                        userId: clientInfo.id,
-                        userName: newName
-                    }));
-                }
-                return; // Exit after handling setName
-            }
-
             // Handle messages based on client type
             if (data.type === 'support-message' && clientInfo.type === 'user') {
                 // User sent a message, send it to their assigned agent
@@ -176,7 +132,7 @@ wss.on('connection', (ws, req) => {
                 if (agentWs && agentWs.readyState === WebSocket.OPEN) {
                     agentWs.send(JSON.stringify({
                         type: 'support-message',
-                        user: clientInfo.name, // Use the updated username
+                        user: clientInfo.name, // Use the stored username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
                         isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
