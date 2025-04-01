@@ -30,12 +30,17 @@ wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const clientType = url.searchParams.get('type') || 'user'; // Default to 'user' if not specified
     const clientId = url.searchParams.get('id') || `client_${Date.now()}`; // Unique ID for each client
-    let clientName = url.searchParams.get('name') || 'Anonymous'; // Get the username from query parameter
+    let clientName = url.searchParams.get('name'); // Get the username from query parameter
+
+    // Debug the raw query parameters to ensure 'name' is being received
+    console.log('Query parameters:', url.searchParams.toString());
+    console.log('Extracted clientName:', clientName);
 
     // Validate and sanitize the username
-    clientName = clientName.trim();
-    if (clientName.length === 0 || clientName.length > 50) {
-        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid
+    if (!clientName || clientName.trim().length === 0 || clientName.trim().length > 50) {
+        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid or missing
+    } else {
+        clientName = clientName.trim();
     }
 
     // If the client is an agent, require authentication
