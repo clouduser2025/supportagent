@@ -1,6 +1,5 @@
 const http = require('http');
 const WebSocket = require('ws');
-const url = require('url');
 
 // Create an HTTP server
 const server = http.createServer((req, res) => {
@@ -27,29 +26,27 @@ const agents = [
 wss.on('connection', (ws, req) => {
     console.log('New WebSocket connection');
 
-    // Parse the URL and query parameters
-    const parsedUrl = url.parse(req.url, true);
-    const query = parsedUrl.query;
-    const clientType = query.type || 'user'; // Default to 'user' if not specified
-    const clientId = query.id || `client_${Date.now()}`; // Unique ID for each client
-    let clientName = query.name; // Get the username from query parameter
-    const contact = query.contact || 'Not provided'; // Get the contact number (if provided)
+    // Determine client type based on query parameter
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const clientType = url.searchParams.get('type') || 'user'; // Default to 'user' if not specified
+    const clientId = url.searchParams.get('id') || `client_${Date.now()}`; // Unique ID for each client
+    let clientName = url.searchParams.get('name'); // Get the username from query parameter
 
     // Debug the raw query parameters to ensure 'name' is being received
-    console.log('Query parameters:', query);
+    console.log('Query parameters:', url.searchParams.toString());
     console.log('Extracted clientName:', clientName);
 
     // Validate and sanitize the username
-    if (!clientName || clientName.trim().length === 0 || clientName.trim().length > 50 || clientName === 'undefined') {
-        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid, missing, or 'undefined'
+    if (!clientName || clientName.trim().length === 0 || clientName.trim().length > 50) {
+        clientName = 'Anonymous'; // Fallback to 'Anonymous' if the name is invalid or missing
     } else {
         clientName = clientName.trim();
     }
 
     // If the client is an agent, require authentication
     if (clientType === 'agent') {
-        const email = query.email;
-        const password = query.password;
+        const email = url.searchParams.get('email');
+        const password = url.searchParams.get('password');
 
         // Find the agent in the credentials store
         const agent = agents.find(a => a.email === email && a.password === password);
@@ -68,8 +65,8 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({ type: 'authenticated', agentId: clientId }));
     } else {
         // For users, assign them to an available agent
-        clients.set(ws, { type: clientType, id: clientId, name: clientName, contact });
-        console.log(`User connected: ${clientId} (${clientType}) - Name: ${clientName}, Contact: ${contact}`);
+        clients.set(ws, { type: clientType, id: clientId, name: clientName });
+        console.log(`User connected: ${clientId} (${clientType}) - Name: ${clientName}`);
 
         // Assign the user to an agent
         let assignedAgentWs = null;
@@ -132,7 +129,7 @@ wss.on('connection', (ws, req) => {
                 if (agentWs && agentWs.readyState === WebSocket.OPEN) {
                     agentWs.send(JSON.stringify({
                         type: 'support-message',
-                        user: clientInfo.name, // Use the actual username
+                        user: clientInfo.name, // Use the stored username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
                         isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
