@@ -126,6 +126,9 @@ wss.on('connection', (ws, req) => {
                     }
                 }
 
+                // Determine if this is the user's first message *before* updating the flag
+                const isFirstMessage = !clientInfo.hasSentMessage;
+
                 // Update the user's name with the first message
                 if (!clientInfo.hasSentMessage) {
                     const newName = data.message.trim();
@@ -151,7 +154,7 @@ wss.on('connection', (ws, req) => {
                         user: clientInfo.name, // Use the updated username
                         userId: clientInfo.id, // Include userId for tracking
                         message: data.message,
-                        isFirstMessage: !clientInfo.hasSentMessage // Flag to indicate if this is the user's first message
+                        isFirstMessage: isFirstMessage // Use the pre-calculated value
                     }));
                 }
             } else if (data.type === 'support-reply' && clientInfo.type === 'agent') {
